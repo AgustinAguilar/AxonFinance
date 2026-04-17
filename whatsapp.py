@@ -147,14 +147,36 @@ def verify_signature(payload_bytes: bytes, signature_header: str) -> bool:
         logger.warning("YCLOUD_WEBHOOK_SECRET no configurado. Omitiendo verificación.")
         return True
     if not signature_header:
+        logger.warning("Falta header YCloud-Signature.")
         return False
     try:
-        parts = dict(p.split("=", 1) for p in signature_header.split(","))
+        parts = dict(p.strip().split("=", 1) for p in signature_header.split(","))
         timestamp = parts.get("t", "")
         signature = parts.get("s", "")
-        signed = f"{timestamp}.{payload_bytes.decode('utf-8')}."
-        expected = hmac.new(secret.encode(), signed.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, signature)
+        body = payload_bytes.decode("utf-8")
+
+        # Probar ambas variantes del secret (con y sin prefijo whsec_)
+        secrets_to_try = [secret]
+        if secret.startswith("whsec_"):
+            secrets_to_try.append(secret[len("whsec_"):])
+
+        for sec in secrets_to_try:
+            for signed in (f"{timestamp}.{body}.", f"{timestamp}.{body}"):
+                expected = hmac.new(sec.encode(), signed.encode(), hashlib.sha256).hexdigest()
+                if hmac.compare_digest(expected, signature):
+                    return True
+
+        # Log de diagnóstico (primeras 12 chars para no leakear)
+        computed = hmac.new(
+            secret.encode(),
+            f"{timestamp}.{body}.".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        logger.warning(
+            "Firma no coincide. ts=%s recv=%s... calc=%s... body_len=%d",
+            timestamp, signature[:12], computed[:12], len(body),
+        )
+        return False
     except Exception as e:
         logger.error("verify_signature error: %s", e)
         return False
