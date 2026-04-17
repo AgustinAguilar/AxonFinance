@@ -242,6 +242,7 @@ def extract_message(payload: dict) -> dict | None:
             "text": None,
             "button_reply": None,
             "document": None,
+            "audio": None,
         }
 
         if msg_type == "text":
@@ -262,6 +263,13 @@ def extract_message(payload: dict) -> dict | None:
                 "media_id": doc.get("id") or doc.get("mediaId"),
                 "filename": doc.get("filename", "documento.pdf"),
                 "mime_type": doc.get("mimeType") or doc.get("mime_type", ""),
+            }
+
+        elif msg_type in ("audio", "voice"):
+            audio = inbound.get("audio") or inbound.get("voice") or {}
+            result["audio"] = {
+                "media_id": audio.get("id") or audio.get("mediaId"),
+                "mime_type": audio.get("mimeType") or audio.get("mime_type", "audio/ogg"),
             }
 
         return result

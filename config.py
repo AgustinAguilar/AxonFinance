@@ -12,6 +12,10 @@ YCLOUD_WEBHOOK_SECRET = os.getenv("YCLOUD_WEBHOOK_SECRET", "")
 CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 4096
 
+# Gemini (transcripción de audio)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
 TAB_GASTOS = "Gastos"

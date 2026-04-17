@@ -25,6 +25,7 @@ import onboarding
 import tools_archive
 import tools_dashboard
 import whatsapp
+import transcribe
 from tools import TOOL_DEFINITIONS, execute_tool
 
 logger = logging.getLogger(__name__)
@@ -135,11 +136,16 @@ async def _process_payload(payload: dict) -> None:
                 "Solo acepto PDFs de resúmenes de tarjeta de crédito. "
                 "Enviá el archivo PDF directamente."
             )
+
+    elif msg_type in ("audio", "voice"):
+        audio = msg["audio"] or {}
+        await _handle_audio(phone, audio)
+
     else:
-        # Tipo no soportado (imagen, audio, sticker, etc.)
+        # Tipo no soportado (imagen, sticker, etc.)
         await whatsapp.send_text(
             phone,
-            "Solo proceso mensajes de texto y PDFs de resúmenes de tarjeta. "
+            "Solo proceso texto, audios y PDFs de resúmenes de tarjeta. "
             "¿En qué te puedo ayudar?"
         )
 
@@ -233,6 +239,31 @@ async def _handle_button(phone: str, btn_id: str, btn_title: str) -> None:
 
     # Botones fuera del onboarding: tratar como texto
     await _handle_text(phone, btn_title)
+
+
+async def _handle_audio(phone: str, audio: dict) -> None:
+    """Descarga un audio, lo transcribe con Gemini y lo procesa como texto."""
+    media_id = audio.get("media_id")
+    mime_type = audio.get("mime_type", "audio/ogg")
+    if not media_id:
+        await whatsapp.send_text(phone, "No pude leer el audio. Probá de nuevo.")
+        return
+
+    content = await whatsapp.download_media(media_id)
+    if not content:
+        await whatsapp.send_text(phone, "No pude descargar el audio. Probá de nuevo.")
+        return
+
+    text = await transcribe.transcribe_audio(content, mime_type)
+    if not text:
+        await whatsapp.send_text(
+            phone,
+            "No pude transcribir el audio. Mandame el mensaje en texto, por favor."
+        )
+        return
+
+    logger.info("audio transcripto phone=%s len=%d", phone, len(text))
+    await _handle_text(phone, text)
 
 
 async def _handle_pdf(phone: str, doc: dict) -> None:
