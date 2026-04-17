@@ -18,6 +18,22 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
+# Google OAuth 2.0 (cada usuario conecta su propio Drive)
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "https://finance.axonlab.cloud/auth/callback",
+)
+GOOGLE_OAUTH_SCOPES = [
+    "openid",
+    "email",
+    "https://www.googleapis.com/auth/drive.file",
+]
+
+# Secret para firmar el state de OAuth (HMAC)
+STATE_SECRET = os.getenv("STATE_SECRET", "axon-finance-state-dev-change-me")
+
 TAB_GASTOS = "Gastos"
 TAB_INGRESOS = "Ingresos"
 TAB_TARJETAS = "Tarjetas"

@@ -14,6 +14,7 @@ from datetime import datetime
 
 import anthropic
 from fastapi import FastAPI, Request, Response, BackgroundTasks, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_TOKENS,
@@ -26,6 +27,7 @@ import tools_archive
 import tools_dashboard
 import whatsapp
 import transcribe
+import oauth as oauth_module
 from tools import TOOL_DEFINITIONS, execute_tool
 
 logger = logging.getLogger(__name__)
@@ -203,7 +205,7 @@ async def _handle_text(phone: str, text: str) -> None:
         return
 
     # Flujo normal con Claude
-    sheets.set_active_sheet(user["sheet_id"])
+    sheets.set_active_user(phone, user["sheet_id"])
 
     if phone not in conversations:
         conversations[phone] = []
@@ -292,7 +294,7 @@ async def _handle_pdf(phone: str, doc: dict) -> None:
     tmp.close()
     pending_pdfs[phone] = tmp.name
 
-    sheets.set_active_sheet(user["sheet_id"])
+    sheets.set_active_user(phone, user["sheet_id"])
 
     if phone not in conversations:
         conversations[phone] = []
@@ -403,7 +405,7 @@ async def _cmd_migrar(phone: str) -> None:
         await whatsapp.send_text(phone, "Primero completá la configuración mandando *inicio*.")
         return
 
-    sheets.set_active_sheet(user["sheet_id"])
+    sheets.set_active_user(phone, user["sheet_id"])
     await whatsapp.send_text(phone, "⏳ Migrando gastos al Histórico...")
 
     try:
@@ -435,6 +437,99 @@ async def _cmd_migrar(phone: str) -> None:
     except Exception as e:
         logger.error("migrar error phone=%s: %s", phone, e, exc_info=True)
         await whatsapp.send_text(phone, "Ocurrió un error al migrar. Intentá de nuevo.")
+
+
+# ─── OAuth endpoints ────────────────────────────────────────────────────────────
+
+@app.get("/auth/{phone}")
+async def auth_start(phone: str):
+    """Inicia el flujo de OAuth para el phone dado. Redirige a Google."""
+    # Sanitizar: solo dígitos
+    phone = "".join(c for c in phone if c.isdigit())
+    if not phone or len(phone) < 8:
+        return HTMLResponse(
+            _render_error("Número inválido. Volvé a WhatsApp y mandá *inicio* de nuevo."),
+            status_code=400,
+        )
+    url = oauth_module.build_authorize_url(phone)
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/auth/callback")
+async def auth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Callback de Google OAuth. Intercambia code por tokens y continúa onboarding."""
+    if error:
+        return HTMLResponse(_render_error(f"Google devolvió un error: {error}"), status_code=400)
+    if not code or not state:
+        return HTMLResponse(_render_error("Faltan parámetros. Reintentá desde WhatsApp."), status_code=400)
+
+    phone = oauth_module._verify_state(state)
+    if not phone:
+        return HTMLResponse(_render_error("Link expirado o inválido. Volvé a WhatsApp y mandá *inicio*."), status_code=400)
+
+    tokens = await oauth_module.exchange_code(code)
+    if not tokens:
+        return HTMLResponse(_render_error("No pude canjear el código con Google. Reintentá."), status_code=500)
+
+    userinfo = await oauth_module.fetch_userinfo(tokens["access_token"])
+    oauth_module.process_callback_sync(phone, tokens, userinfo)
+
+    email = (userinfo or {}).get("email", "")
+    # Avanzar el onboarding al siguiente paso y avisar por WhatsApp
+    user = user_store.get_user(phone) or {}
+    odata = user.get("onboarding_data", {})
+    if email:
+        odata["email"] = email
+    user_store.update_user(
+        phone,
+        onboarding_state="WAIT_NAME",
+        onboarding_data=odata,
+    )
+    await whatsapp.send_text(
+        phone,
+        f"✅ *¡Google conectado!* (como {email or 'tu cuenta'})\n\n"
+        "Ahora te hago *5 preguntas rápidas* y creamos tu planilla.\n\n"
+        "*Pregunta 1 de 5:* ¿Cómo te llamás?"
+    )
+
+    return HTMLResponse(_render_success(email))
+
+
+def _render_success(email: str) -> str:
+    email_line = f"<p class='em'>Conectado como <b>{email}</b></p>" if email else ""
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Axon Finance — Conectado</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#0f172a; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:24px; }}
+.card {{ max-width:420px; background:#1e293b; padding:40px 32px; border-radius:16px; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,.4); }}
+h1 {{ font-size:28px; margin:0 0 8px; }}
+p {{ font-size:16px; line-height:1.5; margin:8px 0; color:#cbd5e1; }}
+.em {{ font-size:14px; color:#94a3b8; }}
+.check {{ font-size:56px; margin-bottom:8px; }}
+.btn {{ display:inline-block; margin-top:24px; background:#25D366; color:#fff; padding:14px 28px; border-radius:999px; text-decoration:none; font-weight:600; }}
+</style></head>
+<body><div class="card">
+<div class="check">✅</div>
+<h1>¡Listo!</h1>
+<p>Tu Google Drive está conectado a <b>Axon Finance</b>.</p>
+{email_line}
+<p>Volvé a WhatsApp para continuar con la configuración.</p>
+<a class="btn" href="https://wa.me/5491157501453">Volver a WhatsApp</a>
+</div></body></html>"""
+
+
+def _render_error(msg: str) -> str:
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Axon Finance — Error</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#0f172a; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; padding:24px; }}
+.card {{ max-width:420px; background:#1e293b; padding:40px 32px; border-radius:16px; text-align:center; }}
+h1 {{ font-size:24px; margin:0 0 8px; color:#f87171; }}
+p {{ font-size:15px; line-height:1.5; color:#cbd5e1; }}
+</style></head>
+<body><div class="card"><h1>⚠️ Algo salió mal</h1><p>{msg}</p></div></body></html>"""
 
 
 # ─── Health check ───────────────────────────────────────────────────────────────

@@ -1,53 +1,57 @@
 """
-sheets.py — Capa de acceso a Google Sheets, multi-tenant.
+sheets.py — Capa de acceso a Google Sheets, multi-tenant con OAuth por usuario.
 
-Usa contextvars.ContextVar para saber qué planilla está activa en cada
-request (seguro para asyncio: cada tarea tiene su propia copia del contexto).
-
-Uso típico en bot.py / tools.py:
-    sheets.set_active_sheet(user["sheet_id"])
-    # ... luego todas las funciones de tools usan get_active_sheet() automáticamente
+Cada request usa las credenciales OAuth del usuario activo (obtenidas de
+users.json vía oauth.get_credentials_for_phone). Las planillas se crean
+en el Drive del propio usuario, con scope drive.file (solo archivos creados
+por la app).
 """
 
 import contextvars
+import logging
 import re
 from datetime import datetime
 
 import gspread
-from google.oauth2.service_account import Credentials
 
 from config import (
-    GOOGLE_CREDENTIALS_FILE,
     TAB_GASTOS, TAB_INGRESOS, TAB_TARJETAS, TAB_RESUMEN, TAB_AHORROS,
     TAB_GASTOS_FIJOS, TAB_PRESTAMOS, TAB_HISTORICO,
     TAB_HEADERS, MESES_ES,
 )
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+logger = logging.getLogger(__name__)
 
-# ContextVar: sheet_id activo para el request actual
+# ContextVars: usuario activo (phone) y planilla activa (sheet_id)
+_active_phone: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "active_phone", default=None
+)
 _active_sheet_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "active_sheet_id", default=None
 )
 
-# Cache: {sheet_id: {tab_name: gspread.Worksheet}}
+# Cache: {phone: gspread.Client} y {sheet_id: {tab_name: gspread.Worksheet}}
+_client_cache: dict[str, gspread.Client] = {}
 _worksheet_cache: dict[str, dict[str, gspread.Worksheet]] = {}
 
-# Singleton del cliente gspread (una sola autorización)
-_client: gspread.Client | None = None
 
-
-def set_active_sheet(sheet_id: str) -> None:
+def set_active_user(phone: str, sheet_id: str) -> None:
+    """Setea el usuario y la planilla activa para el request actual."""
+    _active_phone.set(phone)
     _active_sheet_id.set(sheet_id)
+
+
+def get_active_phone() -> str:
+    val = _active_phone.get()
+    if not val:
+        raise RuntimeError("No hay usuario activo. Llamá set_active_user() primero.")
+    return val
 
 
 def get_active_sheet() -> str:
     val = _active_sheet_id.get()
     if not val:
-        raise RuntimeError("No hay planilla activa. Llamá set_active_sheet() primero.")
+        raise RuntimeError("No hay planilla activa. Llamá set_active_user() primero.")
     return val
 
 
@@ -61,11 +65,19 @@ def safe_float(value, default: float = 0.0) -> float:
 
 
 def _get_client() -> gspread.Client:
-    global _client
-    if _client is None:
-        creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
-        _client = gspread.authorize(creds)
-    return _client
+    """Retorna gspread client con OAuth del usuario activo."""
+    import oauth as oauth_module
+    phone = get_active_phone()
+    creds = oauth_module.get_credentials_for_phone(phone)
+    if not creds:
+        raise RuntimeError(f"Sin credenciales OAuth para phone={phone}. Reconectar Google.")
+    # Cache por phone (invalidar si se refresca el token)
+    cached = _client_cache.get(phone)
+    if cached and cached.auth and cached.auth.token == creds.token:
+        return cached
+    client = gspread.authorize(creds)
+    _client_cache[phone] = client
+    return client
 
 
 def _get_spreadsheet(sheet_id: str) -> gspread.Spreadsheet:
@@ -178,60 +190,76 @@ def invalidate_cache(sheet_id: str | None = None) -> None:
         _worksheet_cache.clear()
 
 
-# ─── Creación de planilla nueva ────────────────────────────────────────────────
+# ─── Creación de planilla nueva en el Drive del usuario ────────────────────────
 
-def create_user_spreadsheet(owner_name: str, owner_email: str | None = None) -> tuple[str, str]:
+def create_user_spreadsheet_for_phone(phone: str, owner_name: str) -> tuple[str, str]:
     """
-    Crea una planilla de Google Sheets nueva para el usuario.
-    - Crea todas las tabs con sus headers.
-    - Si se pasa owner_email, comparte la planilla con ese email (editor).
+    Crea una planilla de Google Sheets en el Drive del cliente (vía OAuth).
+    - Usa Drive API files().create con mimeType spreadsheet → se crea en su Drive.
+    - Scope drive.file → la app solo puede acceder a este archivo (no al resto del Drive).
+    - Crea todas las tabs con sus headers vía Sheets API.
+    - Al ser scope drive.file + creador=usuario, el usuario ya es dueño. No requiere compartir.
     Retorna (sheet_id, sheet_url).
     """
+    import oauth as oauth_module
     from googleapiclient.discovery import build
 
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=SCOPES)
-    sheets_service = build("sheets", "v4", credentials=creds)
+    creds = oauth_module.get_credentials_for_phone(phone)
+    if not creds:
+        raise RuntimeError(f"Sin credenciales OAuth para phone={phone}.")
 
-    # Crear spreadsheet con todas las tabs
-    body = {
-        "properties": {"title": f"Axon Finance — {owner_name}"},
-        "sheets": [
-            {"properties": {"title": tab_name, "index": i}}
-            for i, tab_name in enumerate(TAB_HEADERS.keys())
-        ],
+    # 1. Crear el archivo vía Drive API (queda en el Drive del usuario)
+    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    file_metadata = {
+        "name": f"Axon Finance — {owner_name}",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
     }
-    result = sheets_service.spreadsheets().create(body=body).execute()
-    sheet_id = result["spreadsheetId"]
-    sheet_url = result["spreadsheetUrl"]
+    created = drive_service.files().create(
+        body=file_metadata,
+        fields="id, webViewLink",
+    ).execute()
+    sheet_id = created["id"]
+    sheet_url = created.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
 
-    # Escribir headers en cada tab con batchUpdate
-    data = []
-    for tab_name, headers in TAB_HEADERS.items():
-        data.append({
-            "range": f"'{tab_name}'!A1",
-            "values": [headers],
-        })
+    # 2. Crear las tabs + escribir headers vía Sheets API
+    sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
+    tab_names = list(TAB_HEADERS.keys())
+    # Sheets API: batchUpdate para agregar las tabs nuevas (la default "Hoja 1" la dejamos al final para borrar)
+    add_sheet_requests = [
+        {"addSheet": {"properties": {"title": name, "index": i}}}
+        for i, name in enumerate(tab_names)
+    ]
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id,
+        body={"requests": add_sheet_requests},
+    ).execute()
+
+    # 3. Escribir headers en cada tab
+    data = [
+        {"range": f"'{name}'!A1", "values": [headers]}
+        for name, headers in TAB_HEADERS.items()
+    ]
     sheets_service.spreadsheets().values().batchUpdate(
         spreadsheetId=sheet_id,
         body={"valueInputOption": "RAW", "data": data},
     ).execute()
 
-    # Compartir con el email del usuario
-    if owner_email:
-        drive_service = build("drive", "v3", credentials=creds)
-        drive_service.permissions().create(
-            fileId=sheet_id,
-            body={
-                "type": "user",
-                "role": "writer",
-                "emailAddress": owner_email,
-            },
-            sendNotificationEmail=True,
-            emailMessage=(
-                f"¡Hola {owner_name}! Tu planilla de Axon Finance está lista. "
-                "Guardá este link para acceder siempre a tus finanzas."
-            ),
-        ).execute()
+    # 4. Borrar la "Hoja 1" default que vino con el archivo
+    try:
+        ss_meta = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        default_sheet = None
+        for s in ss_meta.get("sheets", []):
+            title = s.get("properties", {}).get("title", "")
+            if title not in TAB_HEADERS:
+                default_sheet = s["properties"]["sheetId"]
+                break
+        if default_sheet is not None:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": [{"deleteSheet": {"sheetId": default_sheet}}]},
+            ).execute()
+    except Exception as e:
+        logger.warning("No se pudo borrar la hoja default: %s", e)
 
     return sheet_id, sheet_url
