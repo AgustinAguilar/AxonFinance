@@ -1,0 +1,35 @@
+# Secrets
+.env
+credentials.json
+users.json
+
+# Deploy
+deploy.sh
+update.sh
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Images / assets usadas solo para iterar
+*.png
+*.jpg
+*.jpeg
+*.xlsx
+
+# Tempfiles
+*.log
+/tmp/
