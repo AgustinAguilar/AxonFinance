@@ -190,6 +190,10 @@ async def _handle_text(phone: str, text: str) -> None:
         await _cmd_migrar(phone)
         return
 
+    if text_lower in ("/dashboard", "dashboard", "regenerar dashboard"):
+        await _cmd_rebuild_dashboard(phone)
+        return
+
     if text_lower in ("/clear", "limpiar", "clear", "borrar historial"):
         conversations.pop(phone, None)
         pending_pdfs.pop(phone, None)
@@ -405,6 +409,31 @@ async def _send_help(phone: str) -> None:
         '"Cobré $500.000 de sueldo"\n'
         '"¿Cuánto gasté este mes?"'
     )
+
+
+async def _cmd_rebuild_dashboard(phone: str) -> None:
+    user = user_store.get_user(phone)
+    if not user or not user.get("setup_complete"):
+        await whatsapp.send_text(phone, "Primero completá la configuración mandando *inicio*.")
+        return
+
+    await whatsapp.send_text(phone, "⏳ Regenerando Dashboard...")
+    try:
+        personas = user.get("personas", [user.get("nombre", "Usuario")])
+        tarjetas = user.get("tarjetas", [])
+        sheets.rebuild_dashboard_for_phone(
+            phone=phone,
+            sheet_id=user["sheet_id"],
+            personas=personas,
+            tarjetas=tarjetas,
+        )
+        await whatsapp.send_text(
+            phone,
+            f"✅ Dashboard actualizado.\n{user.get('sheet_url', '')}"
+        )
+    except Exception as e:
+        logger.error("rebuild_dashboard error phone=%s: %s", phone, e, exc_info=True)
+        await whatsapp.send_text(phone, "No pude regenerar el Dashboard. Intentá de nuevo.")
 
 
 async def _cmd_migrar(phone: str) -> None:

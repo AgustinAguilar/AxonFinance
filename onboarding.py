@@ -263,6 +263,8 @@ async def _finalize_onboarding(phone: str) -> None:
         sheet_id, sheet_url = sheets_module.create_user_spreadsheet_for_phone(
             phone=phone,
             owner_name=nombre,
+            personas=personas,
+            tarjetas=tarjetas,
         )
     except Exception as e:
         logger.error("Error creando planilla para phone=%s: %s", phone, e, exc_info=True)

@@ -34,6 +34,7 @@ GOOGLE_OAUTH_SCOPES = [
 # Secret para firmar el state de OAuth (HMAC)
 STATE_SECRET = os.getenv("STATE_SECRET", "axon-finance-state-dev-change-me")
 
+TAB_DASHBOARD = "Dashboard"
 TAB_GASTOS = "Gastos"
 TAB_INGRESOS = "Ingresos"
 TAB_TARJETAS = "Tarjetas"
