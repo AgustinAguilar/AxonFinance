@@ -119,18 +119,26 @@ async def get_media_url(media_id: str) -> str | None:
 
 
 async def download_media(media_id: str) -> bytes | None:
-    """Descarga el contenido binario de un media (PDF, imagen, etc.)."""
+    """[Legacy] Descarga media via /media/{id}. YCloud NO expone este endpoint;
+    preferir download_from_link con el link que YCloud manda en el webhook."""
     url = await get_media_url(media_id)
     if not url:
         return None
+    return await download_from_link(url)
+
+
+async def download_from_link(link: str) -> bytes | None:
+    """Descarga media desde un link directo (el que YCloud manda en el webhook)."""
+    if not link:
+        return None
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         try:
-            r = await client.get(url, headers={"X-API-Key": _API_KEY()})
+            r = await client.get(link, headers={"X-API-Key": _API_KEY()})
             if r.status_code == 200:
                 return r.content
-            logger.error("download_media %s → %s", media_id, r.status_code)
+            logger.error("download_from_link → %s: %s", r.status_code, r.text[:200])
         except Exception as e:
-            logger.error("download_media exception: %s", e)
+            logger.error("download_from_link exception: %s", e)
     return None
 
 
@@ -263,6 +271,7 @@ def extract_message(payload: dict) -> dict | None:
                 "media_id": doc.get("id") or doc.get("mediaId"),
                 "filename": doc.get("filename", "documento.pdf"),
                 "mime_type": doc.get("mimeType") or doc.get("mime_type", ""),
+                "link": doc.get("link") or doc.get("url"),
             }
 
         elif msg_type in ("audio", "voice"):
@@ -270,6 +279,7 @@ def extract_message(payload: dict) -> dict | None:
             result["audio"] = {
                 "media_id": audio.get("id") or audio.get("mediaId"),
                 "mime_type": audio.get("mimeType") or audio.get("mime_type", "audio/ogg"),
+                "link": audio.get("link") or audio.get("url"),
             }
 
         return result

@@ -245,13 +245,13 @@ async def _handle_button(phone: str, btn_id: str, btn_title: str) -> None:
 
 async def _handle_audio(phone: str, audio: dict) -> None:
     """Descarga un audio, lo transcribe con Gemini y lo procesa como texto."""
-    media_id = audio.get("media_id")
+    link = audio.get("link")
     mime_type = audio.get("mime_type", "audio/ogg")
-    if not media_id:
+    if not link:
         await whatsapp.send_text(phone, "No pude leer el audio. Probá de nuevo.")
         return
 
-    content = await whatsapp.download_media(media_id)
+    content = await whatsapp.download_from_link(link)
     if not content:
         await whatsapp.send_text(phone, "No pude descargar el audio. Probá de nuevo.")
         return
@@ -277,10 +277,10 @@ async def _handle_pdf(phone: str, doc: dict) -> None:
 
     await whatsapp.send_text(phone, "⏳ Descargando el PDF...")
 
-    media_id = doc.get("media_id")
+    link = doc.get("link")
     filename = doc.get("filename", "resumen.pdf")
 
-    content = await whatsapp.download_media(media_id)
+    content = await whatsapp.download_from_link(link) if link else None
     if not content:
         await whatsapp.send_text(
             phone,
