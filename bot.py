@@ -458,16 +458,21 @@ async def auth_start(phone: str):
 @app.get("/auth/callback")
 async def auth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
     """Callback de Google OAuth. Intercambia code por tokens y continúa onboarding."""
+    logger.info("auth_callback hit: code=%s state=%s error=%s", bool(code), bool(state), error)
     if error:
+        logger.warning("auth_callback google error: %s", error)
         return HTMLResponse(_render_error(f"Google devolvió un error: {error}"), status_code=400)
     if not code or not state:
+        logger.warning("auth_callback missing params: code=%s state=%s", bool(code), bool(state))
         return HTMLResponse(_render_error("Faltan parámetros. Reintentá desde WhatsApp."), status_code=400)
 
     phone = oauth_module._verify_state(state)
+    logger.info("auth_callback verify_state result: phone=%s state_len=%d", phone, len(state))
     if not phone:
         return HTMLResponse(_render_error("Link expirado o inválido. Volvé a WhatsApp y mandá *inicio*."), status_code=400)
 
     tokens = await oauth_module.exchange_code(code)
+    logger.info("auth_callback exchange_code: tokens=%s", bool(tokens))
     if not tokens:
         return HTMLResponse(_render_error("No pude canjear el código con Google. Reintentá."), status_code=500)
 
