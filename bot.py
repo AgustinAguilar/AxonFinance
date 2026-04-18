@@ -440,20 +440,8 @@ async def _cmd_migrar(phone: str) -> None:
 
 
 # ─── OAuth endpoints ────────────────────────────────────────────────────────────
-
-@app.get("/auth/{phone}")
-async def auth_start(phone: str):
-    """Inicia el flujo de OAuth para el phone dado. Redirige a Google."""
-    # Sanitizar: solo dígitos
-    phone = "".join(c for c in phone if c.isdigit())
-    if not phone or len(phone) < 8:
-        return HTMLResponse(
-            _render_error("Número inválido. Volvé a WhatsApp y mandá *inicio* de nuevo."),
-            status_code=400,
-        )
-    url = oauth_module.build_authorize_url(phone)
-    return RedirectResponse(url=url, status_code=302)
-
+# IMPORTANTE: /auth/callback debe estar ANTES de /auth/{phone} porque FastAPI
+# matchea rutas en orden de declaración (sino "callback" se toma como phone).
 
 @app.get("/auth/callback")
 async def auth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
@@ -498,6 +486,20 @@ async def auth_callback(code: str | None = None, state: str | None = None, error
     )
 
     return HTMLResponse(_render_success(email))
+
+
+@app.get("/auth/{phone}")
+async def auth_start(phone: str):
+    """Inicia el flujo de OAuth para el phone dado. Redirige a Google."""
+    # Sanitizar: solo dígitos
+    phone = "".join(c for c in phone if c.isdigit())
+    if not phone or len(phone) < 8:
+        return HTMLResponse(
+            _render_error("Número inválido. Volvé a WhatsApp y mandá *inicio* de nuevo."),
+            status_code=400,
+        )
+    url = oauth_module.build_authorize_url(phone)
+    return RedirectResponse(url=url, status_code=302)
 
 
 def _render_success(email: str) -> str:
