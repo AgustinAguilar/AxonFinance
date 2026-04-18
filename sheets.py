@@ -195,9 +195,9 @@ def invalidate_cache(sheet_id: str | None = None) -> None:
 def rebuild_dashboard_for_phone(phone: str, sheet_id: str,
                                 personas: list[str], tarjetas: list[str]) -> None:
     """
-    (Re)genera la pestaña Dashboard en una planilla existente. Sirve para
-    migrar planillas viejas (sin dashboard) o si cambiaron personas/tarjetas.
-    Crea la tab si no existe, la limpia y escribe la grilla de fórmulas.
+    (Re)genera la pestaña Dashboard en una planilla existente: crea/limpia la
+    tab, escribe fórmulas, aplica estilos y agrega los 3 gráficos de torta.
+    Incluye el resto de las tabs de datos (estiliza su header row).
     """
     import oauth as oauth_module
     from googleapiclient.discovery import build
@@ -208,20 +208,34 @@ def rebuild_dashboard_for_phone(phone: str, sheet_id: str,
 
     sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-    # Ver si ya existe la tab Dashboard
-    ss_meta = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
-    existing = {
-        s.get("properties", {}).get("title", ""): s["properties"]["sheetId"]
-        for s in ss_meta.get("sheets", [])
-    }
+    ss_meta = sheets_service.spreadsheets().get(
+        spreadsheetId=sheet_id,
+        includeGridData=False,
+        fields="sheets(properties(sheetId,title),charts(chartId))",
+    ).execute()
+    sheet_id_map: dict[str, int] = {}
+    existing_charts_on_dashboard: list[int] = []
+    dash_sid: int | None = None
+    for s in ss_meta.get("sheets", []):
+        title = s.get("properties", {}).get("title", "")
+        sid = s["properties"]["sheetId"]
+        sheet_id_map[title] = sid
+        if title == TAB_DASHBOARD:
+            dash_sid = sid
+            for ch in s.get("charts", []) or []:
+                if "chartId" in ch:
+                    existing_charts_on_dashboard.append(ch["chartId"])
 
-    if TAB_DASHBOARD not in existing:
-        sheets_service.spreadsheets().batchUpdate(
+    # 1. Crear Dashboard si no existe
+    if dash_sid is None:
+        add_resp = sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id,
             body={"requests": [
                 {"addSheet": {"properties": {"title": TAB_DASHBOARD, "index": 0}}}
             ]},
         ).execute()
+        dash_sid = add_resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+        sheet_id_map[TAB_DASHBOARD] = dash_sid
     else:
         # Limpiar contenido previo
         sheets_service.spreadsheets().values().clear(
@@ -229,7 +243,8 @@ def rebuild_dashboard_for_phone(phone: str, sheet_id: str,
             range=f"'{TAB_DASHBOARD}'!A1:Z200",
         ).execute()
 
-    grid = _build_dashboard_grid(personas, tarjetas)
+    # 2. Escribir grid de fórmulas
+    grid, layout = _build_dashboard_grid(personas, tarjetas)
     sheets_service.spreadsheets().values().update(
         spreadsheetId=sheet_id,
         range=f"'{TAB_DASHBOARD}'!A1",
@@ -237,66 +252,63 @@ def rebuild_dashboard_for_phone(phone: str, sheet_id: str,
         body={"values": grid},
     ).execute()
 
+    # 3. Borrar charts viejos + aplicar estilos + crear charts nuevos + estilar tabs
+    reqs: list[dict] = []
+    for cid in existing_charts_on_dashboard:
+        reqs.append({"deleteEmbeddedObject": {"objectId": cid}})
+    reqs += _build_dashboard_style_requests(dash_sid, layout)
+    reqs += _build_chart_requests(dash_sid, layout)
+    reqs += _build_data_tab_style_requests(sheet_id_map)
+    if reqs:
+        try:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": reqs},
+            ).execute()
+        except Exception as e:
+            logger.warning("Estilos/charts fallaron en rebuild: %s", e)
 
-def _build_dashboard_grid(personas: list[str], tarjetas: list[str]) -> list[list]:
+
+def _build_dashboard_grid(personas: list[str], tarjetas: list[str]) -> tuple[list[list], dict]:
     """
-    Construye la grilla del Dashboard con fórmulas parametrizadas por las personas
-    y tarjetas del cliente. Retorna una matriz 2D (filas × columnas) lista para
-    mandar a Sheets API con valueInputOption=USER_ENTERED.
-
-    Layout (columnas A..G):
-      Título + mes
-      RESUMEN GENERAL (A-C / D-F / G): Total Gastos | Total Ingresos | Saldo Neto
-      GASTOS POR PERSONA (A-B) | INGRESOS POR PERSONA (D-E)
-      GASTOS POR METODO (A-B) | DEUDA TARJETAS (D-E)
-                              | GASTOS FIJOS / MES (D-E)
-      AHORROS ACUMULADOS (A-C)
-      AHORROS POR TIPO (A-B)
+    Construye la grilla del Dashboard + layout con posiciones clave (0-indexed)
+    para aplicar estilos y armar los charts.
     """
     personas = personas or ["Usuario"]
-    # Matriz usada como dict {(row, col): value} → luego se rellena en rectángulo
     cells: dict[tuple[int, int], str] = {}
 
     def put(row: int, col: int, val) -> None:
         cells[(row, col)] = val
 
-    # Header
     put(0, 0, "💰 Axon Finance — Dashboard Financiero")
     put(1, 0, '=TEXT(TODAY(),"mmmm yyyy")')
 
-    # ── RESUMEN GENERAL (fila 4) ──
+    # ── RESUMEN GENERAL ──
     put(3, 0, "RESUMEN GENERAL")
-    put(4, 0, "Total Gastos")
-    put(4, 3, "Total Ingresos")
-    put(4, 6, "Saldo Neto")
+    put(4, 0, "Total Gastos"); put(4, 3, "Total Ingresos"); put(4, 6, "Saldo Neto")
     put(5, 0, "=SUM(Gastos!E:E)")
     put(5, 3, "=SUM(Ingresos!E:E)")
     put(5, 6, "=SUM(Ingresos!E:E)-SUM(Gastos!E:E)")
 
-    # ── GASTOS POR PERSONA (col A-B) | INGRESOS POR PERSONA (col D-E) ──
-    put(7, 0, "GASTOS POR PERSONA")
-    put(7, 3, "INGRESOS POR PERSONA")
+    # ── GASTOS POR PERSONA / INGRESOS POR PERSONA ──
+    put(7, 0, "GASTOS POR PERSONA"); put(7, 3, "INGRESOS POR PERSONA")
     put(8, 0, "Persona"); put(8, 1, "Total")
     put(8, 3, "Persona"); put(8, 4, "Total")
+    persona_data_start = 9
     for i, p in enumerate(personas):
-        r = 9 + i
-        put(r, 0, p)
-        put(r, 1, f'=SUMIF(Gastos!C:C,"{p}",Gastos!E:E)')
-        put(r, 3, p)
-        put(r, 4, f'=SUMIF(Ingresos!C:C,"{p}",Ingresos!E:E)')
-    tot_p_row = 9 + len(personas)
-    put(tot_p_row, 0, "TOTAL")
-    put(tot_p_row, 1, f"=SUM(B10:B{tot_p_row})")
-    put(tot_p_row, 3, "TOTAL")
-    put(tot_p_row, 4, f"=SUM(E10:E{tot_p_row})")
+        r = persona_data_start + i
+        put(r, 0, p); put(r, 1, f'=SUMIF(Gastos!C:C,"{p}",Gastos!E:E)')
+        put(r, 3, p); put(r, 4, f'=SUMIF(Ingresos!C:C,"{p}",Ingresos!E:E)')
+    persona_data_end = persona_data_start + len(personas) - 1
+    tot_p_row = persona_data_end + 1
+    put(tot_p_row, 0, "TOTAL"); put(tot_p_row, 1, f"=SUM(B{persona_data_start+1}:B{tot_p_row})")
+    put(tot_p_row, 3, "TOTAL"); put(tot_p_row, 4, f"=SUM(E{persona_data_start+1}:E{tot_p_row})")
 
-    # ── GASTOS POR METODO DE PAGO (col A-B) ──
+    # ── GASTOS POR METODO DE PAGO ──
     metodo_start = tot_p_row + 2
     put(metodo_start, 0, "GASTOS POR METODO DE PAGO")
     put(metodo_start + 1, 0, "Metodo"); put(metodo_start + 1, 1, "Total")
-    metodo_rows = [
-        ("Efectivo", '=SUMIF(Gastos!F:F,"efectivo",Gastos!E:E)'),
-    ]
+    metodo_rows = [("Efectivo", '=SUMIF(Gastos!F:F,"efectivo",Gastos!E:E)')]
     for t in tarjetas:
         metodo_rows.append((
             f"Tarjeta {t}",
@@ -306,41 +318,40 @@ def _build_dashboard_grid(personas: list[str], tarjetas: list[str]) -> list[list
         ("MercadoPago", '=SUMIF(Gastos!F:F,"mercadopago",Gastos!E:E)'),
         ("Mercado Credito", '=SUMIF(Gastos!F:F,"mercado_credito",Gastos!E:E)'),
     ]
+    metodo_data_start = metodo_start + 2
     for i, (label, formula) in enumerate(metodo_rows):
-        r = metodo_start + 2 + i
-        put(r, 0, label)
-        put(r, 1, formula)
-    metodo_total_row = metodo_start + 2 + len(metodo_rows)
+        r = metodo_data_start + i
+        put(r, 0, label); put(r, 1, formula)
+    metodo_data_end = metodo_data_start + len(metodo_rows) - 1
+    metodo_total_row = metodo_data_end + 1
     put(metodo_total_row, 0, "TOTAL")
-    put(metodo_total_row, 1, f"=SUM(B{metodo_start + 3}:B{metodo_total_row})")
+    put(metodo_total_row, 1, f"=SUM(B{metodo_data_start+1}:B{metodo_total_row})")
 
-    # ── DEUDA TARJETAS (col D-E) — empieza en la misma fila que metodo ──
+    # ── DEUDA TARJETAS (misma fila que metodo) ──
     deuda_start = metodo_start
     put(deuda_start, 3, "DEUDA TARJETAS (PENDIENTE)")
     put(deuda_start + 1, 3, "Tarjeta"); put(deuda_start + 1, 4, "Total")
+    deuda_total_row = None
     if tarjetas:
         for i, t in enumerate(tarjetas):
             r = deuda_start + 2 + i
-            put(r, 3, t)
-            put(r, 4, f'=SUMIF(Tarjetas!B:B,"{t}",Tarjetas!F:F)')
+            put(r, 3, t); put(r, 4, f'=SUMIF(Tarjetas!B:B,"{t}",Tarjetas!F:F)')
         deuda_total_row = deuda_start + 2 + len(tarjetas)
         put(deuda_total_row, 3, "TOTAL")
-        put(deuda_total_row, 4, f"=SUM(E{deuda_start + 3}:E{deuda_total_row})")
+        put(deuda_total_row, 4, f"=SUM(E{deuda_start+3}:E{deuda_total_row})")
     else:
         put(deuda_start + 2, 3, "Sin tarjetas configuradas")
 
-    # ── GASTOS FIJOS / MES (col D-E) — debajo de deuda tarjetas ──
+    # ── GASTOS FIJOS / MES ──
     fijos_row = (deuda_start + 2 + max(len(tarjetas), 1)) + 2
     put(fijos_row, 3, "GASTOS FIJOS / MES")
     put(fijos_row + 1, 3, "Total estimado")
     put(fijos_row + 1, 4, "=SUMPRODUCT(N('Gastos Fijos'!F2:F200)*N('Gastos Fijos'!B2:B200))")
 
-    # ── AHORROS ACUMULADOS (col A-C) — debajo de gastos por método ──
+    # ── AHORROS ACUMULADOS ──
     ahorros_start = metodo_total_row + 2
     put(ahorros_start, 0, "AHORROS ACUMULADOS")
-    put(ahorros_start + 1, 0, "Persona")
-    put(ahorros_start + 1, 1, "ARS")
-    put(ahorros_start + 1, 2, "USD (blue)")
+    put(ahorros_start + 1, 0, "Persona"); put(ahorros_start + 1, 1, "ARS"); put(ahorros_start + 1, 2, "USD (blue)")
     for i, p in enumerate(personas):
         r = ahorros_start + 2 + i
         put(r, 0, p)
@@ -348,30 +359,301 @@ def _build_dashboard_grid(personas: list[str], tarjetas: list[str]) -> list[list
         put(r, 2, f'=SUMIF(Ahorros!B:B,"{p}",Ahorros!F:F)')
     ahorros_total = ahorros_start + 2 + len(personas)
     put(ahorros_total, 0, "TOTAL")
-    put(ahorros_total, 1, f"=SUM(B{ahorros_start + 3}:B{ahorros_total})")
-    put(ahorros_total, 2, f"=SUM(C{ahorros_start + 3}:C{ahorros_total})")
+    put(ahorros_total, 1, f"=SUM(B{ahorros_start+3}:B{ahorros_total})")
+    put(ahorros_total, 2, f"=SUM(C{ahorros_start+3}:C{ahorros_total})")
 
-    # ── AHORROS POR TIPO (col A-B) ──
+    # ── AHORROS POR TIPO ──
     tipos = ["Jubilacion", "Inversion Corto Plazo", "Ahorro Fisico", "Ahorro Virtual", "Crypto"]
     tipo_start = ahorros_total + 2
     put(tipo_start, 0, "AHORROS POR TIPO")
-    put(tipo_start + 1, 0, "Tipo")
-    put(tipo_start + 1, 1, "ARS")
+    put(tipo_start + 1, 0, "Tipo"); put(tipo_start + 1, 1, "ARS")
     for i, t in enumerate(tipos):
         r = tipo_start + 2 + i
-        put(r, 0, t)
-        put(r, 1, f'=SUMIF(Ahorros!C:C,"{t}",Ahorros!D:D)')
+        put(r, 0, t); put(r, 1, f'=SUMIF(Ahorros!C:C,"{t}",Ahorros!D:D)')
     tipo_total = tipo_start + 2 + len(tipos)
     put(tipo_total, 0, "TOTAL")
-    put(tipo_total, 1, f"=SUM(B{tipo_start + 3}:B{tipo_total})")
+    put(tipo_total, 1, f"=SUM(B{tipo_start+3}:B{tipo_total})")
 
-    # Renderizar a matriz rectangular (rows × cols)
     max_row = max(r for (r, _) in cells.keys())
     max_col = 7  # A..G
     grid = [["" for _ in range(max_col)] for _ in range(max_row + 1)]
     for (r, c), v in cells.items():
         grid[r][c] = v
-    return grid
+
+    layout = {
+        "title_row": 0,
+        "section_header_rows": [3, 7, metodo_start, deuda_start, fijos_row, ahorros_start, tipo_start],
+        "col_header_rows": [  # (row, col_start, col_end_exclusive)
+            (4, 0, 7),
+            (8, 0, 2), (8, 3, 5),
+            (metodo_start + 1, 0, 2),
+            (deuda_start + 1, 3, 5),
+            (fijos_row + 1, 3, 4),
+            (ahorros_start + 1, 0, 3),
+            (tipo_start + 1, 0, 2),
+        ],
+        "total_rows": [  # (row, col_start, col_end_exclusive)
+            (tot_p_row, 0, 2), (tot_p_row, 3, 5),
+            (metodo_total_row, 0, 2),
+            (ahorros_total, 0, 3),
+            (tipo_total, 0, 2),
+        ] + ([(deuda_total_row, 3, 5)] if deuda_total_row is not None else []),
+        "money_ranges": [  # (row_start, row_end_exclusive, col_start, col_end_exclusive)
+            (5, 6, 0, 7),  # resumen general valores
+            (persona_data_start, tot_p_row + 1, 1, 2),
+            (persona_data_start, tot_p_row + 1, 4, 5),
+            (metodo_data_start, metodo_total_row + 1, 1, 2),
+            ((deuda_start + 2, deuda_total_row + 1, 4, 5) if deuda_total_row is not None else None),
+            (fijos_row + 1, fijos_row + 2, 4, 5),
+            (ahorros_start + 2, ahorros_total + 1, 1, 2),  # ARS
+            (ahorros_start + 2, ahorros_total + 1, 2, 3),  # USD
+            (tipo_start + 2, tipo_total + 1, 1, 2),
+        ],
+        "charts": {
+            "gastos_persona": {
+                "title": "Gastos por Persona",
+                "labels": (persona_data_start, persona_data_end + 1, 0),  # A col
+                "values": (persona_data_start, persona_data_end + 1, 1),  # B col
+                "anchor": (3, 7),  # H4
+            },
+            "ingresos_persona": {
+                "title": "Ingresos por Persona",
+                "labels": (persona_data_start, persona_data_end + 1, 3),
+                "values": (persona_data_start, persona_data_end + 1, 4),
+                "anchor": (3, 10),  # K4
+            },
+            "gastos_metodo": {
+                "title": "Gastos por Método de Pago",
+                "labels": (metodo_data_start, metodo_data_end + 1, 0),
+                "values": (metodo_data_start, metodo_data_end + 1, 1),
+                "anchor": (metodo_start - 1, 7),
+            },
+        },
+        "max_row_plus_one": max_row + 1,
+    }
+    # Filtrar None de money_ranges
+    layout["money_ranges"] = [r for r in layout["money_ranges"] if r is not None]
+    return grid, layout
+
+
+# ── Estilos / Charts ───────────────────────────────────────────────────────────
+
+_HEADER_BG = {"red": 0x1F / 255, "green": 0x4E / 255, "blue": 0x79 / 255}
+_HEADER_FG = {"red": 1, "green": 1, "blue": 1}
+_SECTION_BG = {"red": 0xDD / 255, "green": 0xE8 / 255, "blue": 0xF4 / 255}
+_TITLE_BG = {"red": 0x0B / 255, "green": 0x2D / 255, "blue": 0x4E / 255}
+
+
+def _cell_format_request(sheet_id: int, r0: int, r1: int, c0: int, c1: int, fmt: dict, fields: str) -> dict:
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": r0, "endRowIndex": r1,
+                "startColumnIndex": c0, "endColumnIndex": c1,
+            },
+            "cell": {"userEnteredFormat": fmt},
+            "fields": fields,
+        }
+    }
+
+
+def _build_dashboard_style_requests(dashboard_sheet_id: int, layout: dict) -> list[dict]:
+    """Genera los requests de formato para el Dashboard."""
+    reqs: list[dict] = []
+
+    # Título: fila 0, merge A:G, fondo oscuro + texto blanco grande
+    reqs.append({
+        "mergeCells": {
+            "range": {
+                "sheetId": dashboard_sheet_id,
+                "startRowIndex": 0, "endRowIndex": 1,
+                "startColumnIndex": 0, "endColumnIndex": 7,
+            },
+            "mergeType": "MERGE_ALL",
+        }
+    })
+    reqs.append(_cell_format_request(
+        dashboard_sheet_id, 0, 1, 0, 7,
+        {
+            "backgroundColor": _TITLE_BG,
+            "horizontalAlignment": "CENTER",
+            "verticalAlignment": "MIDDLE",
+            "textFormat": {"foregroundColor": _HEADER_FG, "fontSize": 16, "bold": True},
+        },
+        "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+    ))
+    # Fila 1 (mes): bold centrado
+    reqs.append(_cell_format_request(
+        dashboard_sheet_id, 1, 2, 0, 7,
+        {
+            "horizontalAlignment": "CENTER",
+            "textFormat": {"italic": True, "fontSize": 12, "bold": True},
+        },
+        "userEnteredFormat(horizontalAlignment,textFormat)",
+    ))
+
+    # Section headers (azul oscuro + blanco + bold)
+    for row in layout["section_header_rows"]:
+        reqs.append(_cell_format_request(
+            dashboard_sheet_id, row, row + 1, 0, 7,
+            {
+                "backgroundColor": _HEADER_BG,
+                "textFormat": {"foregroundColor": _HEADER_FG, "bold": True, "fontSize": 11},
+                "horizontalAlignment": "LEFT",
+            },
+            "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+        ))
+
+    # Column headers (fondo celeste clarito + bold)
+    for row, c0, c1 in layout["col_header_rows"]:
+        reqs.append(_cell_format_request(
+            dashboard_sheet_id, row, row + 1, c0, c1,
+            {
+                "backgroundColor": _SECTION_BG,
+                "textFormat": {"bold": True},
+            },
+            "userEnteredFormat(backgroundColor,textFormat)",
+        ))
+
+    # Total rows (bold + borde arriba)
+    for row, c0, c1 in layout["total_rows"]:
+        reqs.append(_cell_format_request(
+            dashboard_sheet_id, row, row + 1, c0, c1,
+            {
+                "textFormat": {"bold": True},
+                "borders": {"top": {"style": "SOLID", "width": 1}},
+            },
+            "userEnteredFormat(textFormat,borders)",
+        ))
+
+    # Formato moneda
+    for r0, r1, c0, c1 in layout["money_ranges"]:
+        # USD col usa otro formato
+        is_usd = (c0 == 2 and c1 == 3)  # columna C en bloque de ahorros
+        pattern = '"US$"#,##0.00' if is_usd else '"$"#,##0'
+        reqs.append(_cell_format_request(
+            dashboard_sheet_id, r0, r1, c0, c1,
+            {"numberFormat": {"type": "CURRENCY", "pattern": pattern}},
+            "userEnteredFormat.numberFormat",
+        ))
+
+    # Freeze primeras 2 filas
+    reqs.append({
+        "updateSheetProperties": {
+            "properties": {
+                "sheetId": dashboard_sheet_id,
+                "gridProperties": {"frozenRowCount": 2},
+            },
+            "fields": "gridProperties.frozenRowCount",
+        }
+    })
+
+    # Ancho de columnas
+    for col_idx, width in [(0, 200), (1, 140), (2, 120), (3, 200), (4, 140), (5, 20), (6, 140)]:
+        reqs.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": dashboard_sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": col_idx, "endIndex": col_idx + 1,
+                },
+                "properties": {"pixelSize": width},
+                "fields": "pixelSize",
+            }
+        })
+
+    return reqs
+
+
+def _build_chart_requests(dashboard_sheet_id: int, layout: dict) -> list[dict]:
+    """Genera los 3 pie charts del Dashboard."""
+    reqs: list[dict] = []
+    for _key, spec in layout["charts"].items():
+        lbl_r0, lbl_r1, lbl_col = spec["labels"]
+        val_r0, val_r1, val_col = spec["values"]
+        anchor_row, anchor_col = spec["anchor"]
+        reqs.append({
+            "addChart": {
+                "chart": {
+                    "spec": {
+                        "title": spec["title"],
+                        "titleTextFormat": {"bold": True, "fontSize": 12},
+                        "pieChart": {
+                            "legendPosition": "RIGHT_LEGEND",
+                            "pieHole": 0.4,  # donut
+                            "domain": {
+                                "sourceRange": {"sources": [{
+                                    "sheetId": dashboard_sheet_id,
+                                    "startRowIndex": lbl_r0, "endRowIndex": lbl_r1,
+                                    "startColumnIndex": lbl_col, "endColumnIndex": lbl_col + 1,
+                                }]}
+                            },
+                            "series": {
+                                "sourceRange": {"sources": [{
+                                    "sheetId": dashboard_sheet_id,
+                                    "startRowIndex": val_r0, "endRowIndex": val_r1,
+                                    "startColumnIndex": val_col, "endColumnIndex": val_col + 1,
+                                }]}
+                            },
+                        },
+                    },
+                    "position": {
+                        "overlayPosition": {
+                            "anchorCell": {
+                                "sheetId": dashboard_sheet_id,
+                                "rowIndex": anchor_row,
+                                "columnIndex": anchor_col,
+                            },
+                            "widthPixels": 360,
+                            "heightPixels": 260,
+                        }
+                    },
+                }
+            }
+        })
+    return reqs
+
+
+def _build_data_tab_style_requests(sheet_id_map: dict[str, int]) -> list[dict]:
+    """Formatea la fila de headers de cada tab de datos + freeze."""
+    reqs: list[dict] = []
+    for name, sid in sheet_id_map.items():
+        if name == TAB_DASHBOARD:
+            continue
+        headers = TAB_HEADERS.get(name, [])
+        if not headers:
+            continue
+        n = len(headers)
+        reqs.append(_cell_format_request(
+            sid, 0, 1, 0, n,
+            {
+                "backgroundColor": _HEADER_BG,
+                "textFormat": {"foregroundColor": _HEADER_FG, "bold": True},
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+            },
+            "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)",
+        ))
+        reqs.append({
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sid,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        })
+        reqs.append({
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": sid,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0, "endIndex": n,
+                }
+            }
+        })
+    return reqs
 
 
 def create_user_spreadsheet_for_phone(
@@ -424,12 +706,9 @@ def create_user_spreadsheet_for_phone(
         body={"requests": add_sheet_requests},
     ).execute()
 
-    # 3. Escribir contenido:
-    #    - Dashboard: grilla con fórmulas (USER_ENTERED para que las interprete)
-    #    - Tabs de datos: headers (RAW)
-    dashboard_grid = _build_dashboard_grid(personas, tarjetas)
+    # 3. Escribir contenido
+    dashboard_grid, dash_layout = _build_dashboard_grid(personas, tarjetas)
 
-    # Dashboard va con USER_ENTERED (para fórmulas); el resto con RAW.
     sheets_service.spreadsheets().values().update(
         spreadsheetId=sheet_id,
         range=f"'{TAB_DASHBOARD}'!A1",
@@ -446,22 +725,36 @@ def create_user_spreadsheet_for_phone(
         body={"valueInputOption": "RAW", "data": data},
     ).execute()
 
-    # 4. Borrar la "Hoja 1" default que vino con el archivo
-    try:
-        ss_meta = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
-        known = set(tab_order)
-        default_sheet = None
-        for s in ss_meta.get("sheets", []):
-            title = s.get("properties", {}).get("title", "")
-            if title not in known:
-                default_sheet = s["properties"]["sheetId"]
-                break
-        if default_sheet is not None:
+    # 4. Borrar la "Hoja 1" default + aplicar estilos + charts
+    ss_meta = sheets_service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    sheet_id_map: dict[str, int] = {}
+    default_sheet = None
+    known = set(tab_order)
+    for s in ss_meta.get("sheets", []):
+        title = s.get("properties", {}).get("title", "")
+        sid = s["properties"]["sheetId"]
+        if title in known:
+            sheet_id_map[title] = sid
+        elif default_sheet is None:
+            default_sheet = sid
+
+    style_reqs: list[dict] = []
+    if default_sheet is not None:
+        style_reqs.append({"deleteSheet": {"sheetId": default_sheet}})
+
+    dash_sid = sheet_id_map.get(TAB_DASHBOARD)
+    if dash_sid is not None:
+        style_reqs += _build_dashboard_style_requests(dash_sid, dash_layout)
+        style_reqs += _build_chart_requests(dash_sid, dash_layout)
+    style_reqs += _build_data_tab_style_requests(sheet_id_map)
+
+    if style_reqs:
+        try:
             sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=sheet_id,
-                body={"requests": [{"deleteSheet": {"sheetId": default_sheet}}]},
+                body={"requests": style_reqs},
             ).execute()
-    except Exception as e:
-        logger.warning("No se pudo borrar la hoja default: %s", e)
+        except Exception as e:
+            logger.warning("Estilos/charts fallaron: %s", e)
 
     return sheet_id, sheet_url
