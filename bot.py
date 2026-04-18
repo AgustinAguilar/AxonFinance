@@ -321,13 +321,19 @@ def _agent_loop(phone: str, user: dict) -> str:
     system = _get_system_prompt(user)
     pdf_path = pending_pdfs.get(phone)
 
-    for _ in range(10):
+    for iteration in range(10):
         response = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
             system=system,
             messages=conversations[phone],
             tools=TOOL_DEFINITIONS,
+        )
+
+        tool_names = [b.name for b in response.content if b.type == "tool_use"]
+        logger.info(
+            "agent_loop phone=%s iter=%d stop=%s tools=%s",
+            phone, iteration, response.stop_reason, tool_names,
         )
 
         conversations[phone].append({
@@ -337,7 +343,9 @@ def _agent_loop(phone: str, user: dict) -> str:
 
         if response.stop_reason == "end_turn":
             text_parts = [block.text for block in response.content if block.type == "text"]
-            return "\n".join(text_parts) or "Listo."
+            final = "\n".join(text_parts) or "Listo."
+            logger.info("agent_loop phone=%s final_text=%s", phone, final[:300])
+            return final
 
         elif response.stop_reason == "tool_use":
             tool_results = []

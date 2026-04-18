@@ -6,6 +6,7 @@ la configuración del usuario como parámetro en execute_tool().
 """
 
 import json
+import logging
 
 import tools_finance
 import tools_dashboard
@@ -13,6 +14,8 @@ import tools_pdf
 import tools_fixed
 import tools_loans
 from config import BANKS_SUPPORTED, CATEGORIES
+
+logger = logging.getLogger(__name__)
 
 
 TOOL_DEFINITIONS = [
@@ -369,6 +372,13 @@ def execute_tool(name: str, tool_input: dict, user_config: dict,
         else:
             result = {"ok": False, "error": f"Tool desconocida: {name}"}
     except Exception as e:
+        logger.exception("tool %s falló con input=%s", name, tool_input)
         result = {"ok": False, "error": str(e)}
 
+    logger.info(
+        "tool_exec name=%s input=%s result=%s",
+        name,
+        json.dumps(tool_input, ensure_ascii=False, default=str)[:300],
+        json.dumps(result, ensure_ascii=False, default=str)[:300],
+    )
     return json.dumps(result, ensure_ascii=False, default=str)
