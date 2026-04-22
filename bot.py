@@ -593,11 +593,6 @@ async def health():
     return {"status": "ok", "bot": "Axon Finance"}
 
 
-@app.get("/debug/sentry")
-async def debug_sentry():
-    raise Exception("Sentry test error — Axon Finance")
-
-
 # ─── Startup ────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
