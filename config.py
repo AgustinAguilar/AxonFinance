@@ -38,6 +38,9 @@ STATE_SECRET = os.getenv("STATE_SECRET", "axon-finance-state-dev-change-me")
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production")
 
+# Admin secret para endpoints de monitoreo/uso
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
+
 TAB_DASHBOARD = "Dashboard"
 TAB_GASTOS = "Gastos"
 TAB_INGRESOS = "Ingresos"

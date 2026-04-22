@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_TOKENS,
     MAX_HISTORY, SYSTEM_PROMPT_TEMPLATE, MESES_ES,
-    SENTRY_DSN, SENTRY_ENVIRONMENT,
+    SENTRY_DSN, SENTRY_ENVIRONMENT, ADMIN_SECRET,
 )
 
 if SENTRY_DSN:
@@ -345,9 +345,14 @@ def _agent_loop(phone: str, user: dict) -> str:
         )
 
         tool_names = [b.name for b in response.content if b.type == "tool_use"]
+        try:
+            user_store.add_usage(phone, response.usage.input_tokens, response.usage.output_tokens)
+        except Exception:
+            logger.exception("add_usage failed phone=%s", phone)
         logger.info(
-            "agent_loop phone=%s iter=%d stop=%s tools=%s",
+            "agent_loop phone=%s iter=%d stop=%s tools=%s in=%d out=%d",
             phone, iteration, response.stop_reason, tool_names,
+            response.usage.input_tokens, response.usage.output_tokens,
         )
 
         conversations[phone].append({
@@ -591,6 +596,13 @@ p {{ font-size:15px; line-height:1.5; color:#cbd5e1; }}
 @app.get("/health")
 async def health():
     return {"status": "ok", "bot": "Axon Finance"}
+
+
+@app.get("/admin/usage")
+async def admin_usage(request: Request):
+    if not ADMIN_SECRET or request.headers.get("X-Admin-Secret") != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return user_store.get_usage_summary()
 
 
 # ─── Startup ────────────────────────────────────────────────────────────────────
