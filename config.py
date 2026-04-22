@@ -34,6 +34,10 @@ GOOGLE_OAUTH_SCOPES = [
 # Secret para firmar el state de OAuth (HMAC)
 STATE_SECRET = os.getenv("STATE_SECRET", "axon-finance-state-dev-change-me")
 
+# Sentry (observabilidad / error tracking)
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production")
+
 TAB_DASHBOARD = "Dashboard"
 TAB_GASTOS = "Gastos"
 TAB_INGRESOS = "Ingresos"

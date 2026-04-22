@@ -13,13 +13,23 @@ import tempfile
 from datetime import datetime
 
 import anthropic
+import sentry_sdk
 from fastapi import FastAPI, Request, Response, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_TOKENS,
     MAX_HISTORY, SYSTEM_PROMPT_TEMPLATE, MESES_ES,
+    SENTRY_DSN, SENTRY_ENVIRONMENT,
 )
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        traces_sample_rate=0.1,
+        send_default_pii=False,
+    )
 import user_store
 import sheets
 import onboarding
@@ -581,6 +591,11 @@ p {{ font-size:15px; line-height:1.5; color:#cbd5e1; }}
 @app.get("/health")
 async def health():
     return {"status": "ok", "bot": "Axon Finance"}
+
+
+@app.get("/debug/sentry")
+async def debug_sentry():
+    raise Exception("Sentry test error — Axon Finance")
 
 
 # ─── Startup ────────────────────────────────────────────────────────────────────
